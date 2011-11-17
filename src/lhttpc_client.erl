@@ -162,6 +162,7 @@ send_request(#client_state{socket = undefined} = State) ->
     SocketRequest = {socket, self(), ConnectOptions, ConnectTimeout},
     case gen_server:call(Lb, SocketRequest, infinity) of
         {ok, Socket} ->
+            lhttpc_sock:setopts(Socket, [{active, false}], State#client_state.ssl),
             send_request(State#client_state{socket = Socket});
         {error, Reason} ->
             throw(Reason)
