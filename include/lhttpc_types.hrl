@@ -33,7 +33,9 @@
         {connect_timeout, timeout()} |
         {send_retry, non_neg_integer()} |
         {partial_upload, non_neg_integer() | infinity} |
-        {partial_download, pid(), non_neg_integer() | infinity}.
+        {partial_download, pid(), non_neg_integer() | infinity} |
+        {stream_to, pid()} |
+        {max_connections, pos_integer() | bypass}.
 
 -type options() :: [option()].
 

@@ -106,10 +106,14 @@ execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     ConnectionTimeout = proplists:get_value(connection_timeout, Options, infinity),
     {ChunkedUpload, Request} = lhttpc_lib:format_request(Path, NormalizedMethod,
         Hdrs, Host, Port, Body, PartialUpload),
-    Socket = case lhttpc_lb:checkout(Host, Port, Ssl, MaxConnections, ConnectionTimeout) of
-        {ok, S}   -> S; % Re-using HTTP/1.1 connections
-        retry_later -> throw(retry_later);
-        no_socket -> undefined % Opening a new HTTP/1.1 connection
+    Socket = case MaxConnections of
+        bypass -> undefined;
+        _Number ->
+            case lhttpc_lb:checkout(Host, Port, Ssl, MaxConnections, ConnectionTimeout) of
+                {ok, S}   -> S; % Re-using HTTP/1.1 connections
+                retry_later -> throw(retry_later);
+                no_socket -> undefined % Opening a new HTTP/1.1 connection
+            end
     end,
     State = #client_state{
         req_id = ReqId,
@@ -134,10 +138,13 @@ execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
         part_size = proplists:get_value(part_size,
             PartialDownloadOptions, infinity)
     },
-    Response = case send_request(State) of
-        {R, undefined} ->
+    Response = case {MaxConnections, send_request(State)} of
+        {_, {R, undefined}} ->
             {ok, R};
-        {R, NewSocket} ->
+        {bypass, {R, NewSocket}} ->
+            lhttpc_sock:close(NewSocket, Ssl),
+            {ok, R};
+        {_, {R, NewSocket}} ->
             % The socket we ended up doing the request over is returned
             % here, it might be the same as Socket, but we don't know.
             lhttpc_lb:checkin(Host, Port, Ssl, NewSocket),
