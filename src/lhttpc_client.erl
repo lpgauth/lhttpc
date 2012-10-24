@@ -63,7 +63,8 @@
 
 -spec request(term(), pid(), string(), 1..65535, true | false, string(),
         string() | atom(), headers(), iolist(), [option()]) -> no_return().
-%% @spec (From, Host, Port, Ssl, Path, Method, Hdrs, RequestBody, Options) -> ok
+%% @spec (ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, RequestBody, Options) -> ok
+%%    ReqId = term()
 %%    From = pid()
 %%    Host = string()
 %%    Port = integer()
