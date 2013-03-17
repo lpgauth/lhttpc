@@ -134,6 +134,7 @@ tcp_test_() ->
                 ?_test(bad_url()),
                 ?_test(persistent_connection()),
                 ?_test(request_timeout()),
+                ?_test(connection_timeout()),
                 ?_test(suspended_manager()),
                 ?_test(chunked_encoding()),
                 ?_test(partial_upload_identity()),
@@ -151,7 +152,8 @@ tcp_test_() ->
                 ?_test(partial_download_smallish_chunks()),
                 ?_test(partial_download_slow_chunks()),
                 ?_test(close_connection()),
-                ?_test(message_queue())
+                ?_test(message_queue()),
+                ?_test(connection_count()) % just check that it's 0 (last)
             ]}
     }.
 
@@ -160,7 +162,8 @@ ssl_test_() ->
         {setup, fun start_app/0, fun stop_app/1, [
                 ?_test(ssl_get()),
                 ?_test(ssl_post()),
-                ?_test(ssl_chunked())
+                ?_test(ssl_chunked()),
+                ?_test(connection_count()) % just check that it's 0 (last)
             ]}
     }.
 
@@ -376,6 +379,18 @@ request_timeout() ->
     URL = url(Port, "/slow"),
     ?assertEqual({error, timeout}, lhttpc:request(URL, get, [], 50)).
 
+connection_timeout() ->
+    Port = start(gen_tcp, [fun simple_response/5, fun simple_response/5]),
+    URL = url(Port, "/close_conn"),
+    lhttpc_manager:update_connection_timeout(50), % very short keep alive
+    {ok, Response} = lhttpc:request(URL, get, [], 100),
+    ?assertEqual({200, "OK"}, status(Response)),
+    ?assertEqual(<<?DEFAULT_STRING>>, body(Response)),
+    timer:sleep(100),
+    ?assertEqual(0,
+        lhttpc_manager:connection_count({"localhost", Port, false})),
+    lhttpc_manager:update_connection_timeout(300000). % set back
+
 suspended_manager() ->
     Port = start(gen_tcp, [fun simple_response/5, fun simple_response/5]),
     URL = url(Port, "/persistent"),
@@ -386,6 +401,8 @@ suspended_manager() ->
     true = erlang:suspend_process(Pid),
     ?assertEqual({error, timeout}, lhttpc:request(URL, get, [], 50)),
     true = erlang:resume_process(Pid),
+    ?assertEqual(1,
+        lhttpc_manager:connection_count({"localhost", Port, false})),
     {ok, SecondResponse} = lhttpc:request(URL, get, [], 50),
     ?assertEqual({200, "OK"}, status(SecondResponse)),
     ?assertEqual(<<?DEFAULT_STRING>>, body(SecondResponse)).
@@ -467,7 +484,7 @@ partial_upload_chunked() ->
     ?assertEqual(<<?DEFAULT_STRING>>, body(Response1)),
     ?assertEqual("This is chunky stuff!",
         lhttpc_lib:header_value("x-test-orig-body", headers(Response1))),
-    ?assertEqual(element(2, Trailer),
+    ?assertEqual(element(2, Trailer), 
         lhttpc_lib:header_value("x-test-orig-trailer-1", headers(Response1))),
     % Make sure it works with no body part in the original request as well
     Headers = [{"Transfer-Encoding", "chunked"}],
@@ -480,7 +497,7 @@ partial_upload_chunked() ->
     ?assertEqual(<<?DEFAULT_STRING>>, body(Response2)),
     ?assertEqual("This is chunky stuff!",
         lhttpc_lib:header_value("x-test-orig-body", headers(Response2))),
-    ?assertEqual(element(2, Trailer),
+    ?assertEqual(element(2, Trailer), 
         lhttpc_lib:header_value("x-test-orig-trailer-1", headers(Response2))).
 
 partial_upload_chunked_no_trailer() ->
@@ -663,6 +680,10 @@ ssl_chunked() ->
             headers(SecondResponse))),
     ?assertEqual("2", lhttpc_lib:header_value("Trailer-2",
             headers(SecondResponse))).
+
+connection_count() ->
+    timer:sleep(50), % give the TCP stack time to deliver messages
+    ?assertEqual(0, lhttpc_manager:connection_count()).
 
 invalid_options() ->
     ?assertError({bad_options, [{foo, bar}, bad_option]},

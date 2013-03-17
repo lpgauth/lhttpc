@@ -32,7 +32,7 @@
 -module(lhttpc_sup).
 -behaviour(supervisor).
 
--export([start_link/0]).
+-export([start_link/0, start_link/1]).
 -export([init/1]).
 
 -type child() :: {atom(), {atom(), atom(), list(any)},
@@ -46,12 +46,23 @@
 %% @end
 -spec start_link() -> {ok, pid()} | {error, atom()}.
 start_link() ->
-    supervisor:start_link(?MODULE, nil).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+start_link(Args) ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
 
 %% @hidden
 -spec init(any()) -> {ok, {{atom(), integer(), integer()}, [child()]}}.
-init(_) ->
-    LHTTPCManager = {lhttpc_manager, {lhttpc_manager, start_link, []},
-        permanent, 10000, worker, [lhttpc_manager]
-    },
-    {ok, {{one_for_one, 10, 1}, [LHTTPCManager]}}.
+init(Opts) ->
+    init_ets(Opts),
+    {ok, {{simple_one_for_one, 10, 1}, [
+        {load_balancer,
+         {lhttpc_lb, start_link, []},
+         transient, 10000, worker, [lhttpc_lb]}
+    ]}}.
+
+init_ets(Opts) ->
+    ETSOpts = proplists:get_value(ets, Opts, []),
+    %% Only option supported so far -- others do not really make sense at this point
+    ReadConc = {read_concurrency, proplists:get_value(read_concurrency, ETSOpts, false)},
+    ets:new(lhttpc_lb, [named_table, set, public, ReadConc]).

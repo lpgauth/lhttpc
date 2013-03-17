@@ -29,11 +29,11 @@
 %%% @end
 {application, lhttpc,
     [{description, "Lightweight HTTP Client"},
-        {vsn, "1.2.6"},
-        {modules, []},
-        {registered, [lhttpc_manager]},
+        {vsn, "1.2.8"},
+        {modules, [lhttpc,lhttpc_sup,lhttpc_client,lhttpc_sock,lhttp_lb]},
+        {registered, [lhttpc_sup]},
         {applications, [kernel, stdlib, ssl, crypto]},
-  {mod, {lhttpc, nil}},
-  {env, []}
+  {mod, {lhttpc, []}},
+  {env, [{connection_timeout, 300000}]}
  ]}.
 

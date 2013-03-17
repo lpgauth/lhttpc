@@ -1,182 +1,250 @@
+%%% Load balancer for lhttpc, replacing the older lhttpc_manager.
+%%% Takes a similar stance of storing used-but-not-closed sockets.
+%%% Also adds functionality to limit the number of simultaneous
+%%% connection attempts from clients.
 -module(lhttpc_lb).
-
--export([
-        start_link/1
-    ]).
--export([
-        init/1,
-        handle_call/3,
-        handle_cast/2,
-        handle_info/2,
-        code_change/3,
-        terminate/2
-    ]).
-
 -behaviour(gen_server).
+-export([start_link/5, checkout/5, checkin/3, checkin/4]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2,
+         code_change/3, terminate/2]).
 
--record(httpc_man, {
-        host :: string(),
-        port = 80 :: integer(),
-        ssl = false :: true | false,
-        max_connections = 10 :: non_neg_integer(),
-        connection_timeout = 300000 :: non_neg_integer(),
-        sockets,
-        available_sockets = []
-    }).
+-define(SHUTDOWN_DELAY, 10000).
 
-%% @spec (any()) -> {ok, pid()}
-%% @doc Starts and link to the gen server.
-%% This is normally called by a supervisor.
-%% @end
--spec start_link(any()) -> {ok, pid()}.
-start_link([Dest, Opts]) ->
-    gen_server:start_link(?MODULE, [Dest, Opts], []).
+%% TODO: transfert_socket, in case of checkout+give_away
 
-%% @hidden
--spec init(any()) -> {ok, #httpc_man{}}.
-init([{Host, Port, Ssl}, {MaxConnections, ConnectionTimeout}]) ->
-    State = #httpc_man{
-        host = Host,
-        port = Port,
-        ssl = Ssl,
-        max_connections = MaxConnections,
-        connection_timeout = ConnectionTimeout,
-        sockets = ets:new(sockets, [set])
-    },
-    {ok, State}.
+-record(state, {host :: host(),
+                port :: port(),
+                ssl :: boolean(),
+                max_conn :: max_connections(),
+                timeout :: timeout(),
+                clients :: ets:tid(),
+                free=[] :: list()}).
 
-%% @hidden
--spec handle_call(any(), any(), #httpc_man{}) ->
-    {reply, any(), #httpc_man{}}.
-handle_call({socket, Pid, ConnectOptions, ConnectTimeout}, _, State) ->
-    {Reply, NewState} = find_socket(Pid, ConnectOptions, ConnectTimeout, State),
-    {reply, Reply, NewState};
-handle_call(_, _, State) ->
-    {reply, {error, unknown_request}, State}.
+-export_types([host/0, port/0, max_connections/0, connection_timeout/0]).
+-type host() :: inet:ip_address()|string().
+-type port_number() :: 1..65535.
+-type max_connections() :: pos_integer().
+-type connection_timeout() :: timeout().
 
-%% @hidden
--spec handle_cast(any(), #httpc_man{}) -> {noreply, #httpc_man{}}.
-handle_cast({store, Socket}, State) ->
-    NewState = store_socket(Socket, State),
-    {noreply, NewState};
-handle_cast({remove, Socket}, State) ->
-    NewState = remove_socket(Socket, State),
-    {noreply, NewState};
-handle_cast({terminate}, State) ->
-    terminate(undefined, State),
-    {noreply, State};
-handle_cast(_, State) ->
-    {noreply, State}.
 
-%% @hidden
--spec handle_info(any(), #httpc_man{}) -> {noreply, #httpc_man{}}.
-handle_info({tcp_closed, Socket}, State) ->
-    {noreply, remove_socket(Socket, State)};
-handle_info({ssl_closed, Socket}, State) ->
-    {noreply, remove_socket(Socket, State)};
-handle_info({timeout, Socket}, State) ->
-    {noreply, remove_socket(Socket, State)};
-handle_info({tcp_error, Socket, _}, State) ->
-    {noreply, remove_socket(Socket, State)};
-handle_info({ssl_error, Socket, _}, State) ->
-    {noreply, remove_socket(Socket, State)};
-handle_info({tcp, Socket, _}, State) ->
-    {noreply, remove_socket(Socket, State)}; % got garbage
-handle_info({ssl, Socket, _}, State) ->
-    {noreply, remove_socket(Socket, State)}; % got garbage
-handle_info(_, State) ->
-    {noreply, State}.
+-spec start_link(host(), port_number(), SSL::boolean(),
+                 max_connections(), connection_timeout()) -> {ok, pid()}.
+start_link(Host, Port, Ssl, MaxConn, ConnTimeout) ->
+    gen_server:start_link(?MODULE, {Host, Port, Ssl, MaxConn, ConnTimeout}, []).
 
-%% @hidden
--spec terminate(any(), #httpc_man{}) -> ok.
-terminate(_, State) ->
-    close_sockets(State#httpc_man.sockets, State#httpc_man.ssl).
+-spec checkout(host(), port_number(), SSL::boolean(),
+               max_connections(), connection_timeout()) ->
+        {ok, port()} | retry_later | no_socket.
+checkout(Host, Port, Ssl, MaxConn, ConnTimeout) ->
+    Lb = find_lb({Host,Port,Ssl}, {MaxConn, ConnTimeout}),
+    gen_server:call(Lb, {checkout, self()}, infinity).
 
-%% @hidden
--spec code_change(any(), #httpc_man{}, any()) -> #httpc_man{}.
-code_change(_, State, _) ->
-    State.
-
-find_socket(Pid, ConnectOptions, ConnectTimeout, State) ->
-    Host = State#httpc_man.host,
-    Port = State#httpc_man.port,
-    Ssl = State#httpc_man.ssl,
-    case State#httpc_man.available_sockets of
-        [Socket|Available] ->
-            case lhttpc_sock:controlling_process(Socket, Pid, Ssl) of
-                ok ->
-                    [{Socket,Timer}] = ets:lookup(State#httpc_man.sockets, Socket),
-                    cancel_timer(Timer, Socket),
-                    NewState = State#httpc_man{available_sockets = Available},
-                    {{ok, Socket}, NewState};
-                {error, badarg} ->
-                    lhttpc_sock:setopts(Socket, [{active, once}], Ssl),
-                    {{error, no_pid}, State};
-                {error, _Reason} ->
-                    NewState = State#httpc_man{available_sockets = Available},
-                    find_socket(Pid, ConnectOptions, ConnectTimeout, remove_socket(Socket, NewState))
-            end;
-        [] ->
-            MaxSockets = State#httpc_man.max_connections,
-            Size = ets:info(State#httpc_man.sockets, size),
-            case MaxSockets > Size andalso Size =/= undefined of
-                true ->
-                    SocketOptions = [binary, {packet, http}, {active, false} | ConnectOptions],
-                    case lhttpc_sock:connect(Host, Port, SocketOptions, ConnectTimeout, Ssl) of
-                        {ok, Socket} ->
-                            find_socket(Pid, ConnectOptions, ConnectTimeout, store_socket(Socket, State));
-                        {error, etimedout} ->
-                            {{error, sys_timeout}, State};
-                        {error, timeout} ->
-                            {{error, timeout}, State};
-                        {error, Reason} ->
-                            {{error, Reason}, State}
-                    end;
-            false ->
-                {{error, retry_later}, State}
-        end
+%% Called when the socket has died and we're done
+-spec checkin(host(), port_number(), SSL::boolean()) -> ok.
+checkin(Host, Port, Ssl) ->
+    case find_lb({Host,Port,Ssl}) of
+        {error, undefined} -> ok; % LB is dead. Pretend it's fine -- we don't care
+        {ok, Pid} -> gen_server:cast(Pid, {checkin, self()})
     end.
 
-remove_socket(Socket, State) ->
-    case ets:lookup(State#httpc_man.sockets, Socket) of
-        [{Socket,Timer}] ->
-            cancel_timer(Timer, Socket),
-            lhttpc_sock:close(Socket, State#httpc_man.ssl),
-            ets:delete(State#httpc_man.sockets, Socket);
+%% Called when we're done and the socket can still be reused
+-spec checkin(host(), port_number(), SSL::boolean(), Socket::port()) -> ok.
+checkin(Host, Port, Ssl, Socket) ->
+    case find_lb({Host,Port,Ssl}) of
+        {error, undefined} ->
+            %% should we close the socket? We're not keeping it! There are no
+            %% Lbs available!
+            ok;
+        {ok, Pid} ->
+            %% Give ownership back to the server ASAP. The client has to have
+            %% kept the socket passive. We rely on its good behaviour.
+            %% If the transfer doesn't work, we don't notify.
+            case lhttpc_sock:controlling_process(Socket, Pid, Ssl) of
+                ok -> gen_server:cast(Pid, {checkin, self(), Socket});
+                _ -> ok
+            end
+    end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% GEN_SERVER CALLBACKS %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+init({Host,Port,Ssl,MaxConn,ConnTimeout}) ->
+    %% we must use insert_new because it is possible a concurrent request is
+    %% starting such a server at exactly the same time.
+    case ets:insert_new(?MODULE, {{Host,Port,Ssl}, self()}) of
+        true ->
+            {ok, #state{host=Host,
+                        port=Port,
+                        ssl=Ssl,
+                        max_conn=MaxConn,
+                        timeout=ConnTimeout,
+                        clients=ets:new(clients, [set, private])}};
+        false ->
+            ignore
+    end.
+
+handle_call({checkout,Pid}, _From, S = #state{free=[], max_conn=Max, clients=Tid}) ->
+    Size = ets:info(Tid, size),
+    case Max > Size of
+        true ->
+            Ref = erlang:monitor(process, Pid),
+            ets:insert(Tid, {Pid, Ref}),
+            {reply, no_socket, S};
+        false ->
+            {reply, retry_later, S}
+    end;
+handle_call({checkout,Pid}, _From, S = #state{free=[{Taken,Timer}|Free], clients=Tid, ssl=Ssl}) ->
+    lhttpc_sock:setopts(Taken, [{active,false}], Ssl),
+    case lhttpc_sock:controlling_process(Taken, Pid, Ssl) of
+        ok ->
+            cancel_timer(Timer, Taken),
+            add_client(Tid,Pid),
+            {reply, {ok, Taken}, S#state{free=Free}};
+        {error, badarg} ->
+            %% The caller died.
+            lhttpc_sock:setopts(Taken, [{active, once}], Ssl),
+            {noreply, S};
+        {error, _Reason} -> % socket is closed or something
+            cancel_timer(Timer, Taken),
+            handle_call({checkout,Pid}, _From, S#state{free=Free})
+    end;
+handle_call(_Msg, _From, S) ->
+    {noreply, S}.
+
+handle_cast({checkin, Pid}, S = #state{clients=Tid}) ->
+    remove_client(Tid, Pid),
+    noreply_maybe_shutdown(S);
+handle_cast({checkin, Pid, Socket}, S = #state{ssl=Ssl, clients=Tid, free=Free, timeout=T}) ->
+    remove_client(Tid, Pid),
+    %% the client cast function took care of giving us ownership
+    case lhttpc_sock:setopts(Socket, [{active, once}], Ssl) of
+        ok ->
+            Timer = start_timer(Socket,T),
+            {noreply, S#state{free=[{Socket,Timer}|Free]}};
+        {error, _E} -> % socket closed or failed
+            noreply_maybe_shutdown(S)
+    end;
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info({'DOWN', _Ref, process, Pid, _Reason}, S=#state{clients=Tid}) ->
+    %% Client died
+    remove_client(Tid,Pid),
+    noreply_maybe_shutdown(S);
+handle_info({tcp_closed, Socket}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({ssl_closed, Socket}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({timeout, Socket}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({tcp_error, Socket, _}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({ssl_error, Socket, _}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({tcp, Socket, _}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info({ssl, Socket, _}, State) ->
+    noreply_maybe_shutdown(remove_socket(Socket,State));
+handle_info(timeout, State) ->
+    {stop, normal, State};
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+terminate(_Reason, #state{host=H, port=P, ssl=Ssl, free=Free, clients=Tid}) ->
+    ets:delete(Tid),
+    ets:delete(?MODULE,{H,P,Ssl}),
+    [lhttpc_sock:close(Socket,Ssl) || {Socket, _TimerRef} <- Free],
+    ok.
+
+%%%%%%%%%%%%%%%
+%%% PRIVATE %%%
+%%%%%%%%%%%%%%%
+
+%% Potential race condition: if the lb shuts itself down after a while, it
+%% might happen between a read and the use of the pid. A busy load balancer
+%% should not have this problem.
+-spec find_lb(Name::{host(),port_number(),boolean()}, {max_connections(), connection_timeout()}) -> pid().
+find_lb(Name = {Host,Port,Ssl}, Args={MaxConn, ConnTimeout}) ->
+    case ets:lookup(?MODULE, Name) of
         [] ->
-            ok
-    end,
-    State.
+            case supervisor:start_child(lhttpc_sup, [Host,Port,Ssl,MaxConn,ConnTimeout]) of
+                {ok, undefined} -> find_lb(Name,Args);
+                {ok, Pid} -> Pid
+            end;
+        [{_Name, Pid}] ->
+            case is_process_alive(Pid) of % lb died, stale entry
+                true -> Pid;
+                false ->
+                    ets:delete(?MODULE, Name),
+                    find_lb(Name,Args)
+            end
+    end.
 
-store_socket(Socket, State) ->
-    Timeout = State#httpc_man.connection_timeout,
-    Timer = case Timeout of
-        infinity -> undefined;
-        _Other -> erlang:send_after(Timeout, self(), {timeout, Socket})
-    end,
-    lhttpc_sock:setopts(Socket, [{active, once}], State#httpc_man.ssl),
-    ets:insert(State#httpc_man.sockets, {Socket, Timer}),
-    State#httpc_man{available_sockets = [Socket|State#httpc_man.available_sockets]}.
+%% Version of the function to be used when we don't want to start a load balancer
+%% if none is found
+-spec find_lb(Name::{host(),port_number(),boolean()}) -> {error,undefined} | {ok,pid()}.
+find_lb(Name={_Host,_Port,_Ssl}) ->
+    case ets:lookup(?MODULE, Name) of
+        [] -> {error, undefined};
+        [{_Name, Pid}] ->
+            case erlang:is_process_alive(Pid) of
+                true -> {ok, Pid};
+                false -> % lb died, stale entry
+                    ets:delete(?MODULE,Name),
+                    {error, undefined}
+            end
+    end.
 
-close_sockets(Sockets, Ssl) ->
-    ets:foldl(
-        fun({Socket, undefined}, _) ->
-                lhttpc_sock:close(Socket, Ssl);
-            ({Socket, Timer}, _) ->
-                erlang:cancel_timer(Timer),
-                lhttpc_sock:close(Socket, Ssl)
-        end, ok, Sockets
-    ).
+-spec add_client(ets:tid(), pid()) -> true.
+add_client(Tid, Pid) ->
+    Ref = erlang:monitor(process, Pid),
+    ets:insert(Tid, {Pid, Ref}).
 
-cancel_timer(undefined, _Socket) ->
-    ok;
-cancel_timer(Timer, Socket) ->
-    case erlang:cancel_timer(Timer) of
+-spec remove_client(ets:tid(), pid()) -> true.
+remove_client(Tid, Pid) ->
+    case ets:lookup(Tid, Pid) of
+        [] -> ok; % client already removed
+        [{_Pid, Ref}] ->
+            erlang:demonitor(Ref, [flush]),
+            ets:delete(Tid, Pid)
+    end.
+
+-spec remove_socket(port(), #state{}) -> #state{}.
+remove_socket(Socket, S = #state{ssl=Ssl, free=Free}) ->
+    lhttpc_sock:close(Socket, Ssl),
+    S#state{free=drop_and_cancel(Socket,Free)}.
+
+-spec drop_and_cancel(port(), [{port(), reference()}]) -> [{port(), reference()}].
+drop_and_cancel(_, []) -> [];
+drop_and_cancel(Socket, [{Socket, TimerRef} | Rest]) ->
+    cancel_timer(TimerRef, Socket),
+    Rest;
+drop_and_cancel(Socket, [H|T]) ->
+    [H | drop_and_cancel(Socket, T)].
+
+-spec cancel_timer(reference(), port()) -> ok.
+cancel_timer(TimerRef, Socket) ->
+    case erlang:cancel_timer(TimerRef) of
         false ->
             receive
                 {timeout, Socket} -> ok
-            after
-                0 -> ok
+            after 0 -> ok
             end;
         _ -> ok
+    end.
+
+-spec start_timer(port(), connection_timeout()) -> reference().
+start_timer(_, infinity) -> make_ref(); % dummy timer
+start_timer(Socket, Timeout) ->
+    erlang:send_after(Timeout, self(), {timeout,Socket}).
+
+noreply_maybe_shutdown(S=#state{clients=Tid, free=Free}) ->
+    case Free =:= [] andalso ets:info(Tid, size) =:= 0 of
+        true -> % we're done for
+            {noreply,S,?SHUTDOWN_DELAY};
+        false ->
+            {noreply, S}
     end.

@@ -52,7 +52,7 @@
 %% @hidden
 -spec start(normal | {takeover, node()} | {failover, node()}, any()) ->
     {ok, pid()}.
-start(_, _) ->
+start(_, Opts) ->
     case lists:member({seed,1}, ssl:module_info(exports)) of
         true ->
             % Make sure that the ssl random number generator is seeded
@@ -61,7 +61,9 @@ start(_, _) ->
         false ->
             ok
     end,
-    lhttpc_sup:start_link().
+    if is_list(Opts) -> lhttpc_sup:start_link(Opts);
+       true -> lhttpc_sup:start_link()
+    end.
 
 %% @hidden
 -spec stop(any()) -> ok.
@@ -320,12 +322,16 @@ request(URL, Method, Hdrs, Body, Timeout, Options) ->
     headers(), iolist(), pos_integer(), [option()]) -> result().
 request(Host, Port, Ssl, Path, Method, Hdrs, Body, Timeout, Options) ->
     verify_options(Options, []),
-    ReqId = erlang:now(),
+    ReqId = now(),
     case proplists:is_defined(stream_to, Options) of
         true ->
             StreamTo = proplists:get_value(stream_to, Options),
             Args = [ReqId, StreamTo, Host, Port, Ssl, Path, Method, Hdrs, Body, Options],
-            Pid = spawn(lhttpc_client, request_with_timeout, [Timeout, Args]),
+            Pid = spawn(lhttpc_client, request, Args),
+            spawn(fun() ->
+                R = kill_client_after(Pid, Timeout),
+                StreamTo ! {response, ReqId, Pid, R}
+            end),
             {ReqId, Pid};
         false ->
             Args = [ReqId, self(), Host, Port, Ssl, Path, Method, Hdrs, Body, Options],
@@ -338,7 +344,7 @@ request(Host, Port, Ssl, Path, Method, Hdrs, Body, Timeout, Options) ->
                     % linked client send us an exit signal, since this can be
                     % caught by the caller.
                     exit(Reason);
-                {'EXIT', ReqId, Pid, Reason} ->
+                {'EXIT', Pid, Reason} ->
                     % This could happen if the process we're running in taps exits
                     % and the client process exits due to some exit signal being
                     % sent to it. Very unlikely though
@@ -397,7 +403,7 @@ send_body_part({Pid, 0}, IoList, Timeout) when is_pid(Pid) ->
             send_body_part({Pid, 1}, IoList, Timeout);
         {response, _ReqId, Pid, R} ->
             R;
-        {exit, Pid, Reason} ->
+        {exit, _ReqId, Pid, Reason} ->
             exit(Reason);
         {'EXIT', Pid, Reason} ->
             exit(Reason)
@@ -410,9 +416,9 @@ send_body_part({Pid, Window}, IoList, _Timeout) when Window > 0, is_pid(Pid) ->
     receive
         {ack, Pid} ->
             {ok, {Pid, Window}};
-        {response, _ReqId, Pid, R} ->
+        {reponse, _ReqId, Pid, R} ->
             R;
-        {exit, Pid, Reason} ->
+        {exit, _ReqId, Pid, Reason} ->
             exit(Reason);
         {'EXIT', Pid, Reason} ->
             exit(Reason)
@@ -515,7 +521,7 @@ read_response(Pid, Timeout) ->
             read_response(Pid, Timeout);
         {response, _ReqId, Pid, R} ->
             R;
-        {exit, Pid, Reason} ->
+        {exit, _ReqId, Pid, Reason} ->
             exit(Reason);
         {'EXIT', Pid, Reason} ->
             exit(Reason)
@@ -537,6 +543,23 @@ kill_client(Pid) ->
             erlang:error(Reason)
     end.
 
+kill_client_after(Pid, Timeout) ->
+    erlang:monitor(process, Pid),
+    receive
+        {'DOWN', _, process, Pid, _Reason} -> exit(normal)
+    after Timeout ->
+        catch unlink(Pid), % or we'll kill ourself :O
+        exit(Pid, timeout),
+        receive
+            {'DOWN', _, process, Pid, timeout} ->
+                {error, timeout};
+            {'DOWN', _, process, Pid, Reason}  ->
+                erlang:error(Reason)
+        after 1000 ->
+            exit(normal) % silent failure!
+        end
+    end.
+
 -spec verify_options(options(), options()) -> ok.
 verify_options([{send_retry, N} | Options], Errors)
         when is_integer(N), N >= 0 ->
@@ -551,11 +574,8 @@ verify_options([{connection_timeout, infinity} | Options], Errors) ->
 verify_options([{connection_timeout, MS} | Options], Errors)
         when is_integer(MS), MS >= 0 ->
     verify_options(Options, Errors);
-verify_options([{max_connections, MS} | Options], Errors)
-        when is_integer(MS), MS >= 0 ->
-    verify_options(Options, Errors);
-verify_options([{stream_to, Pid} | Options], Errors)
-        when is_pid(Pid) ->
+verify_options([{max_connections, N} | Options], Errors)
+        when is_integer(N), N > 0 ->
     verify_options(Options, Errors);
 verify_options([{partial_upload, WindowSize} | Options], Errors)
         when is_integer(WindowSize), WindowSize >= 0 ->
@@ -573,6 +593,8 @@ verify_options([{partial_download, DownloadOptions} | Options], Errors)
     end;
 verify_options([{connect_options, List} | Options], Errors)
         when is_list(List) ->
+    verify_options(Options, Errors);
+verify_options([{stream_to, Pid} | Options], Errors) when is_pid(Pid) ->
     verify_options(Options, Errors);
 verify_options([Option | Options], Errors) ->
     verify_options(Options, [Option | Errors]);

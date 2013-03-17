@@ -29,7 +29,6 @@
 %%% @doc
 %%% This module implements wrappers for socket operations.
 %%% Makes it possible to have the same interface to ssl and tcp sockets.
-%%% @end
 -module(lhttpc_sock).
 
 -export([
@@ -60,9 +59,25 @@
 -spec connect(host(), integer(), socket_options(), timeout(), boolean()) ->
     {ok, socket()} | {error, atom()}.
 connect(Host, Port, Options, Timeout, true) ->
-    ssl:connect(Host, Port, Options, Timeout);
+    % Avoid port leak with potential race condition in case of timeout
+    Flag = process_flag(trap_exit, true),
+    Res = ssl:connect(Host, Port, Options, Timeout),
+    receive
+          {'EXIT',_Pid,timeout} -> exit(timeout)
+        after 0 ->
+                process_flag(trap_exit, Flag),
+                Res
+        end;
 connect(Host, Port, Options, Timeout, false) ->
-    gen_tcp:connect(Host, Port, Options, Timeout).
+    % Avoid port leak with potential race condition in case of timeout
+    Flag = process_flag(trap_exit, true),
+    Res = gen_tcp:connect(Host, Port, Options, Timeout),
+    receive
+          {'EXIT',_Pid,timeout} -> exit(timeout)
+        after 0 ->
+                process_flag(trap_exit, Flag),
+                Res
+        end.
 
 %% @spec (Socket, SslFlag) -> {ok, Data} | {error, Reason}
 %%   Socket = socket()
@@ -80,7 +95,7 @@ connect(Host, Port, Options, Timeout, false) ->
 recv(Socket, true) ->
     ssl:recv(Socket, 0);
 recv(Socket, false) ->
-    inet_tcp:recv(Socket, 0).
+    gen_tcp:recv(Socket, 0).
 
 %% @spec (Socket, Length, SslFlag) -> {ok, Data} | {error, Reason}
 %%   Socket = socket()
@@ -155,6 +170,22 @@ setopts(Socket, Options, false) ->
 %% @end
 -spec close(socket(), boolean()) -> ok | {error, atom()}.
 close(Socket, true) ->
-    ssl:close(Socket);
+    % Avoid port leak with potential race condition in case of timeout
+    Flag = process_flag(trap_exit, true),
+    Res = ssl:close(Socket),
+    receive
+        {'EXIT',_Pid,timeout} -> exit(timeout)
+    after 0 ->
+            process_flag(trap_exit, Flag),
+            Res
+    end;
 close(Socket, false) ->
-    gen_tcp:close(Socket).
+    % Avoid port leak with potential race condition in case of timeout
+    Flag = process_flag(trap_exit, true),
+    Res = gen_tcp:close(Socket),
+    receive
+        {'EXIT',_Pid,timeout} -> exit(timeout)
+    after 0 ->
+            process_flag(trap_exit, Flag),
+            Res
+    end.
