@@ -158,7 +158,9 @@ request(URL, Method, Hdrs, Body, Timeout) ->
 %%            {connect_options, [ConnectOptions]} |
 %%            {send_retry, integer()} |
 %%            {partial_upload, WindowSize} |
-%%            {partial_download, PartialDownloadOptions}
+%%            {partial_download, PartialDownloadOptions} |
+%%            {stream_to, pid()} |
+%%            {max_connections, pos_integer() | bypass}
 %%   Milliseconds = integer()
 %%   ConnectOptions = term()
 %%   WindowSize = integer() | infinity
@@ -205,7 +207,9 @@ request(URL, Method, Hdrs, Body, Timeout, Options) ->
 %%            {connect_options, [ConnectOptions]} |
 %%            {send_retry, integer()} |
 %%            {partial_upload, WindowSize} |
-%%            {partial_download, PartialDownloadOptions}
+%%            {partial_download, PartialDownloadOptions} |
+%%            {stream_to, pid()} |
+%%            {max_connections, pos_integer() | bypass}
 %%   Milliseconds = integer()
 %%   WindowSize = integer()
 %%   PartialDownloadOptions = [PartialDownloadOption]
@@ -575,7 +579,7 @@ verify_options([{connection_timeout, MS} | Options], Errors)
         when is_integer(MS), MS >= 0 ->
     verify_options(Options, Errors);
 verify_options([{max_connections, N} | Options], Errors)
-        when is_integer(N), N > 0 ->
+        when is_integer(N), N > 0; N =:= bypass ->
     verify_options(Options, Errors);
 verify_options([{partial_upload, WindowSize} | Options], Errors)
         when is_integer(WindowSize), WindowSize >= 0 ->
