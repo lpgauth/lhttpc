@@ -71,7 +71,8 @@ connect(Host, Port, Options, Timeout, true) ->
 connect(Host, Port, Options, Timeout, false) ->
     % Avoid port leak with potential race condition in case of timeout
     Flag = process_flag(trap_exit, true),
-    Res = gen_tcp:connect(Host, Port, Options, Timeout),
+    Options2 = [{nodelay, true} | Options],
+    Res = gen_tcp:connect(Host, Port, Options2, Timeout),
     receive
           {'EXIT',_Pid,timeout} -> exit(timeout)
         after 0 ->
