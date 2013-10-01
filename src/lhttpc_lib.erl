@@ -146,7 +146,9 @@ split_port(Scheme, [P | T], Port) ->
 -spec format_request(iolist(), atom() | string(), headers(), string(),
     integer(), iolist(), true | false ) -> {true | false, iolist()}.
 format_request(Path, Method, Hdrs, Host, Port, Body, PartialUpload) ->
-    AllHdrs = add_mandatory_hdrs(Method, Hdrs, Host, Port, Body, PartialUpload),
+    Timesent = float_to_list(rtb_lib_utils:timestamp_to_epoch(os:timestamp()), [{decimals, 6}]),
+    Hdrs2 = [{"X-Timesent", Timesent} | Hdrs],
+    AllHdrs = add_mandatory_hdrs(Method, Hdrs2, Host, Port, Body, PartialUpload),
     IsChunked = is_chunked(AllHdrs),
     {
         IsChunked,
