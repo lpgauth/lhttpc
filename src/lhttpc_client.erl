@@ -104,6 +104,7 @@ execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     NormalizedMethod = lhttpc_lib:normalize_method(Method),
     MaxConnections = proplists:get_value(max_connections, Options, 10),
     ConnectionTimeout = proplists:get_value(connection_timeout, Options, infinity),
+    Timestamp = os:timestamp(),
     Socket = case MaxConnections of
         bypass -> undefined;
         _Number ->
@@ -113,8 +114,10 @@ execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
                 no_socket -> undefined % Opening a new HTTP/1.1 connection
             end
     end,
+    CheckoutTime = integer_to_list(timer:now_diff(os:timestamp(), Timestamp)),
+    Hdrs2 = [{"X-CheckoutTime", CheckoutTime} | Hdrs],
     {ChunkedUpload, Request} = lhttpc_lib:format_request(Path, NormalizedMethod,
-        Hdrs, Host, Port, Body, PartialUpload),
+        Hdrs2, Host, Port, Body, PartialUpload),
     State = #client_state{
         req_id = ReqId,
         host = Host,
