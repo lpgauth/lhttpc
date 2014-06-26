@@ -1,3 +1,4 @@
+%%% coding: latin-1
 %%% Load balancer for lhttpc, replacing the older lhttpc_manager.
 %%% Takes a similar stance of storing used-but-not-closed sockets.
 %%% Also adds functionality to limit the number of simultaneous
