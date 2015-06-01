@@ -160,7 +160,7 @@ request(URL, Method, Hdrs, Body, Timeout) ->
 %%            {send_retry, integer()} |
 %%            {partial_upload, WindowSize} |
 %%            {partial_download, PartialDownloadOptions} |
-%%            {stream_to, pid()} |
+%%            {stream_to, pid() | undefined} |
 %%            {max_connections, pos_integer() | bypass}
 %%   Milliseconds = integer()
 %%   ConnectOptions = term()
@@ -209,7 +209,7 @@ request(URL, Method, Hdrs, Body, Timeout, Options) ->
 %%            {send_retry, integer()} |
 %%            {partial_upload, WindowSize} |
 %%            {partial_download, PartialDownloadOptions} |
-%%            {stream_to, pid()} |
+%%            {stream_to, pid() | undefined} |
 %%            {max_connections, pos_integer() | bypass}
 %%   Milliseconds = integer()
 %%   WindowSize = integer()
@@ -335,7 +335,10 @@ request(Host, Port, Ssl, Path, Method, Hdrs, Body, Timeout, Options) ->
             Pid = spawn(lhttpc_client, request, Args),
             spawn(fun() ->
                 R = kill_client_after(Pid, Timeout),
-                StreamTo ! {response, ReqId, Pid, R}
+                case StreamTo of
+                    undefined -> ok;
+                    _ -> StreamTo ! {response, ReqId, Pid, R}
+                end
             end),
             {ReqId, Pid};
         false ->
@@ -598,6 +601,8 @@ verify_options([{partial_download, DownloadOptions} | Options], Errors)
     end;
 verify_options([{connect_options, List} | Options], Errors)
         when is_list(List) ->
+    verify_options(Options, Errors);
+verify_options([{stream_to, undefined} | Options], Errors) ->
     verify_options(Options, Errors);
 verify_options([{stream_to, Pid} | Options], Errors) when is_pid(Pid) ->
     verify_options(Options, Errors);
