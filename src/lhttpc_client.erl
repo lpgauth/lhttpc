@@ -93,12 +93,13 @@ request(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
         _Else                               ->
         case From of
             undefined -> ok;
-            _ -> From ! Result
+            _ ->
+                From ! Result,
+                % Don't send back {'EXIT', self(), normal} if the process
+                % calling us is trapping exits
+                unlink(From)
         end
     end,
-    % Don't send back {'EXIT', self(), normal} if the process
-    % calling us is trapping exits
-    unlink(From),
     ok.
 
 execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
