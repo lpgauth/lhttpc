@@ -90,7 +90,11 @@ request(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     end,
     case Result of
         {response, _, _, {ok, {no_return, _}}} -> ok;
-        _Else                               -> From ! Result
+        _Else                               ->
+        case From of
+            undefined -> ok;
+            _ -> From ! Result
+        end
     end,
     % Don't send back {'EXIT', self(), normal} if the process
     % calling us is trapping exits
