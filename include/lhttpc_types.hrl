@@ -35,7 +35,7 @@
         {partial_upload, non_neg_integer() | infinity} |
         {partial_download, pid(), non_neg_integer() | infinity} |
         {max_connections, non_neg_integer() | bypass} |
-        {stream_to, pid()}.
+        {stream_to, pid() | undefined}.
 
 -type options() :: [option()].
 
